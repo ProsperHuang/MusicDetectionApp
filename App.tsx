@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect } from 'react';
 import {
-  Alert, 
+  Alert,
   Pressable,
   StyleSheet,
   Text,
@@ -11,14 +11,23 @@ import {
 import {
   getRecordingPermissionsAsync,
   requestRecordingPermissionsAsync,
+  RecordingPresets,
+  setAudioModeAsync,
+  useAudioRecorder,
+  useAudioRecorderState,
 } from 'expo-audio';
 
 export default function App() {
-  // Tracks whether the app is currently in listening mode.
-  const [isListening, setIsListening] = useState(false);
+  // Create one microphone recorder for this screen.
+  // Metering lets us see whether real sound is reaching the microphone.
+  const audioRecorder = useAudioRecorder({
+    ...RecordingPresets.HIGH_QUALITY,
+    isMeteringEnabled: true,
+  });
 
-  // Tracks whether microphone permission has been granted.
-  const [hasMicPermission, setHasMicPermission] = useState(false);
+  // Ask Expo for updated information about the recorder every 100 ms.
+  // This gives us recording status, duration, and microphone level.
+  const recorderState = useAudioRecorderState(audioRecorder, 100);
 
   // Returns "light", "dark", or sometimes null depending on the device.
   const colorScheme = useColorScheme();
@@ -31,20 +40,33 @@ export default function App() {
   const backgroundColor = isDarkMode ? '#121212' : '#FFFFFF';
   const textColor = isDarkMode ? '#FFFFFF' : '#000000';
 
-  // Checks whether microphone permission already exists.
+  // Configure the device's audio system once when this screen starts.
+  useEffect(() => {
+    const configureAudio = async () => {
+      await setAudioModeAsync({
+        // Allow this app to use the microphone for recording.
+        allowsRecording: true,
+
+        // Useful on Apple devices so audio features still work
+        // when silent mode is enabled.
+        playsInSilentMode: true,
+      });
+    };
+
+    configureAudio();
+  }, []);
+
+  // Check whether microphone permission already exists.
   // If it does not, ask the operating system for permission.
   const ensureMicrophonePermission = async (): Promise<boolean> => {
     const currentPermission = await getRecordingPermissionsAsync();
 
     if (currentPermission.granted) {
-      setHasMicPermission(true);
       return true;
     }
 
-    // This causes Android/iPadOS to show the system permission dialog.
+    // Ask Android/iPadOS to show the system microphone permission dialog.
     const requestedPermission = await requestRecordingPermissionsAsync();
-
-    setHasMicPermission(requestedPermission.granted);
 
     if (!requestedPermission.granted) {
       Alert.alert(
@@ -56,6 +78,28 @@ export default function App() {
     }
 
     return true;
+  };
+
+  // Start real microphone capture.
+  const startListening = async () => {
+    const permissionGranted = await ensureMicrophonePermission();
+
+    // Do nothing if the user denied microphone access.
+    if (!permissionGranted) {
+      return;
+    }
+
+    // Prepare the recorder, then begin recording.
+    await audioRecorder.prepareToRecordAsync();
+    await audioRecorder.record();
+  };
+
+  // Stop microphone capture.
+  const stopListening = async () => {
+    await audioRecorder.stop();
+
+    // For now, print where Expo stored the temporary recording.
+    console.log('Recording saved to:', audioRecorder.uri);
   };
 
   return (
@@ -84,30 +128,19 @@ export default function App() {
       </Text>
 
       <Pressable
-        onPress={async () => {
-          // STOP does not require another permission check.
-          if (isListening) {
-            setIsListening(false);
-            return;
-          }
-
-          // Before starting, make sure the microphone is available.
-          const permissionGranted = await ensureMicrophonePermission();
-
-          if (permissionGranted) {
-            setIsListening(true);
-          }
-        }}
-
-        // pressed is automatically provided by React Native.
-        // We use it here to slightly fade the button while it is being pressed.
+        // Start or stop the actual microphone recorder.
+        onPress={
+          recorderState.isRecording
+            ? stopListening
+            : startListening
+        }
         style={({ pressed }) => [
           styles.button,
           pressed && styles.buttonPressed,
         ]}
       >
         <Text style={styles.buttonText}>
-          {isListening ? 'STOP' : 'LISTEN'}
+          {recorderState.isRecording ? 'STOP' : 'LISTEN'}
         </Text>
       </Pressable>
 
@@ -117,8 +150,34 @@ export default function App() {
           { color: textColor },
         ]}
       >
-        {isListening ? 'Listening...' : 'Stopped'}
+        {recorderState.isRecording ? 'Listening...' : 'Stopped'}
       </Text>
+
+      {recorderState.isRecording && (
+        <>
+          <Text
+            style={[
+              styles.recordingInfo,
+              { color: textColor },
+            ]}
+          >
+            Recording time:{' '}
+            {(recorderState.durationMillis / 1000).toFixed(1)} s
+          </Text>
+
+          <Text
+            style={[
+              styles.recordingInfo,
+              { color: textColor },
+            ]}
+          >
+            Microphone level:{' '}
+            {recorderState.metering !== undefined
+              ? `${recorderState.metering.toFixed(1)} dB`
+              : 'Waiting...'}
+          </Text>
+        </>
+      )}
     </View>
   );
 }
@@ -170,5 +229,10 @@ const styles = StyleSheet.create({
   status: {
     fontSize: 16,
     marginTop: 24,
+  },
+
+  recordingInfo: {
+    fontSize: 14,
+    marginTop: 8,
   },
 });
