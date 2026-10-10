@@ -1,4 +1,5 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { File } from 'expo-file-system';
 import {
   Alert,
   Pressable,
@@ -18,6 +19,20 @@ import {
 } from 'expo-audio';
 
 export default function App() {
+  // Stores the song returned by the recognition service.
+  const [detectedSong, setDetectedSong] = useState<{
+    title: string;
+    artist: string;
+  } | null>(null);
+
+  // Lets the UI show that recognition is currently in progress.
+  const [isRecognizing, setIsRecognizing] = useState(false);
+
+  // Stores a recognition error or "no match" message.
+  const [recognitionMessage, setRecognitionMessage] = useState<string | null>(
+    null
+  );
+
   // Create one microphone recorder for this screen.
   // Metering lets us see whether real sound is reaching the microphone.
   const audioRecorder = useAudioRecorder({
@@ -80,6 +95,73 @@ export default function App() {
     return true;
   };
 
+  // Send a recorded audio clip to AudD for music recognition.
+  const recognizeRecording = async (uri: string) => {
+    try {
+      setDetectedSong(null);
+      setIsRecognizing(true);
+      setRecognitionMessage(null);
+
+      // Access the temporary recording created by expo-audio.
+      const recordingFile = new File(uri);
+
+      // Convert the audio file into a base64 string.
+      // This avoids Expo Go's current multipart/FormData issue.
+      const audioBase64 = await recordingFile.base64();
+
+      // Build a normal URL-encoded request instead of multipart FormData.
+      const requestBody = new URLSearchParams();
+      requestBody.append('api_token', 'test');
+      requestBody.append('audio', audioBase64);
+
+      const response = await fetch('https://api.audd.io/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: requestBody.toString(),
+      });
+
+      if (!response.ok) {
+        throw new Error(
+          `Recognition request failed: ${response.status}`
+        );
+      }
+
+      const data = await response.json();
+
+      console.log('AudD response:', data);
+
+      if (data.status === 'success' && data.result) {
+        setDetectedSong({
+          title: data.result.title,
+          artist: data.result.artist,
+        });
+
+        setRecognitionMessage(null);
+      } else if (data.status === 'success') {
+        // The API worked, but it could not identify the song.
+        setDetectedSong(null);
+        setRecognitionMessage('No song recognized.');
+      } else {
+        // AudD itself returned an API error.
+        console.error('AudD API error:', data);
+
+        setDetectedSong(null);
+        setRecognitionMessage(
+          data.error?.error_message ?? 'Music recognition failed.'
+        );
+      }
+    } catch (error) {
+      console.error('Recognition error:', error);
+
+      setDetectedSong(null);
+      setRecognitionMessage('Music recognition failed.');
+    } finally {
+      setIsRecognizing(false);
+    }
+  };
+
   // Start real microphone capture.
   const startListening = async () => {
     const permissionGranted = await ensureMicrophonePermission();
@@ -98,8 +180,18 @@ export default function App() {
   const stopListening = async () => {
     await audioRecorder.stop();
 
-    // For now, print where Expo stored the temporary recording.
-    console.log('Recording saved to:', audioRecorder.uri);
+    const recordingUri = audioRecorder.uri;
+
+    console.log('Recording saved to:', recordingUri);
+
+    // Make sure Expo actually produced a recording file.
+    if (!recordingUri) {
+      setRecognitionMessage('No recording was created.');
+      return;
+    }
+
+    // Send the temporary clip to the music-recognition service.
+    await recognizeRecording(recordingUri);
   };
 
   return (
@@ -178,6 +270,50 @@ export default function App() {
           </Text>
         </>
       )}
+
+      {isRecognizing && (
+        <Text
+          style={[
+            styles.recognitionText,
+            { color: textColor },
+          ]}
+        >
+          Identifying song...
+        </Text>
+      )}
+
+      {detectedSong && (
+        <View style={styles.songResult}>
+          <Text
+            style={[
+              styles.songTitle,
+              { color: textColor },
+            ]}
+          >
+            {detectedSong.title}
+          </Text>
+
+          <Text
+            style={[
+              styles.songArtist,
+              { color: textColor },
+            ]}
+          >
+            {detectedSong.artist}
+          </Text>
+        </View>
+      )}
+
+      {recognitionMessage && (
+        <Text
+          style={[
+            styles.recognitionText,
+            { color: textColor },
+          ]}
+        >
+          {recognitionMessage}
+        </Text>
+      )}
     </View>
   );
 }
@@ -234,5 +370,25 @@ const styles = StyleSheet.create({
   recordingInfo: {
     fontSize: 14,
     marginTop: 8,
+  },
+
+  recognitionText: {
+    fontSize: 16,
+    marginTop: 16,
+  },
+
+  songResult: {
+    alignItems: 'center',
+    marginTop: 24,
+  },
+
+  songTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
+  },
+
+  songArtist: {
+    fontSize: 18,
+    marginTop: 4,
   },
 });
